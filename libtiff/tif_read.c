@@ -507,12 +507,10 @@ int TIFFReadScanline(TIFF *tif, void *buf, uint32_t row, uint16_t sample)
             (*tif->tif_postdecode)(tif, (uint8_t *)buf,
                                    tif->tif_dir.td_scanlinesize);
     }
-    else
-    {
-        /* See TIFFReadEncodedStrip comment regarding TIFFTAG_FAXFILLFUNC. */
-        if (buf)
-            memset(buf, 0, (size_t)tif->tif_dir.td_scanlinesize);
-    }
+    /* If TIFFSeek() failed, leave the caller's buffer untouched: this
+     * converges with the raw and encoded strip/tile entry points, which
+     * return -1 on a short read / read error without overwriting bytes the
+     * caller pre-filled. A NULL buf (e.g. TIFFTAG_FAXFILLFUNC) is fine too. */
     return (e > 0 ? 1 : -1);
 }
 
@@ -599,10 +597,13 @@ tmsize_t TIFFReadEncodedStrip(TIFF *tif, uint32_t strip, void *buf,
         stripsize = size;
     if (!TIFFFillStrip(tif, strip))
     {
-        /* The output buf may be NULL, in particular if TIFFTAG_FAXFILLFUNC
-           is being used. Thus, memset must be conditional on buf not NULL. */
-        if (buf)
-            memset(buf, 0, (size_t)stripsize);
+        /* Do not touch the caller's buffer on failure. TIFFReadRawStrip1()
+         * (the raw strip entry point) leaves the unread part of the buffer
+         * alone and returns -1 on a short read / read error, so the encoded
+         * entry point must converge to the same state and preserve any bytes
+         * the caller pre-filled. This also covers a NULL buf used with
+         * TIFFTAG_FAXFILLFUNC, for which the memset had to be skipped anyway.
+         */
         return ((tmsize_t)(-1));
     }
     if ((*tif->tif_decodestrip)(tif, (uint8_t *)buf, stripsize, plane) <= 0)
@@ -991,6 +992,7 @@ int TIFFFillStrip(TIFF *tif, uint32_t strip)
                 if (TIFFReadRawStrip1(tif, strip, tif->tif_rawdata, bytecountm,
                                       module) != bytecountm)
                 {
+                    tif->tif_dir.td_curstrip = NOSTRIP;
                     return (0);
                 }
             }
@@ -999,6 +1001,7 @@ int TIFFFillStrip(TIFF *tif, uint32_t strip)
                 if (TIFFReadRawStripOrTile2(tif, strip, 1, bytecountm,
                                             module) != bytecountm)
                 {
+                    tif->tif_dir.td_curstrip = NOSTRIP;
                     return (0);
                 }
             }
@@ -1074,9 +1077,13 @@ tmsize_t TIFFReadEncodedTile(TIFF *tif, uint32_t tile, void *buf, tmsize_t size)
         size = tilesize;
     if (!TIFFFillTile(tif, tile))
     {
-        /* See TIFFReadEncodedStrip comment regarding TIFFTAG_FAXFILLFUNC. */
-        if (buf)
-            memset(buf, 0, (size_t)size);
+        /* Do not touch the caller's buffer on failure: TIFFReadRawTile1()
+         * (the raw tile entry point) only writes the bytes the read callback
+         * delivered and returns -1 on a short read / read error, so the
+         * encoded entry point must converge to the same state and leave any
+         * bytes the caller pre-filled (e.g. a 0xCC pattern) untouched. The
+         * library's own raw buffer is already sanitised by
+         * TIFFReadAndRealloc() and no decoder runs on the failed tile. */
         return ((tmsize_t)(-1));
     }
     else if ((*tif->tif_decodetile)(tif, (uint8_t *)buf, size,
@@ -1458,6 +1465,7 @@ int TIFFFillTile(TIFF *tif, uint32_t tile)
                 if (TIFFReadRawTile1(tif, tile, tif->tif_rawdata, bytecountm,
                                      module) != bytecountm)
                 {
+                    tif->tif_dir.td_curtile = NOTILE;
                     return (0);
                 }
             }
@@ -1466,6 +1474,7 @@ int TIFFFillTile(TIFF *tif, uint32_t tile)
                 if (TIFFReadRawStripOrTile2(tif, tile, 0, bytecountm, module) !=
                     bytecountm)
                 {
+                    tif->tif_dir.td_curtile = NOTILE;
                     return (0);
                 }
             }
